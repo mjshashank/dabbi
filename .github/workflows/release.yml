@@ -1,0 +1,230 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Prevent concurrent releases
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write  # For attestations
+  attestations: write
+
+jobs:
+  # Run tests before building release
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Run Go tests
+        run: go test -tags dev -race ./...
+
+      - name: Run UI tests
+        run: |
+          cd ui
+          npm ci
+          npm run test
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: validate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Build UI
+        run: |
+          cd ui
+          npm ci
+          npm run build
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          COMMIT=${GITHUB_SHA::8}
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${VERSION} -X main.buildTime=${BUILD_TIME} -X main.commit=${COMMIT}" \
+            -o dabbi ./cmd/dabbi
+
+      - name: Verify binary
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: |
+          ./dabbi --help
+          ./dabbi --version || true
+
+      - name: Package
+        run: |
+          ARCHIVE_NAME="dabbi-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz"
+          tar -czvf "${ARCHIVE_NAME}" dabbi
+          sha256sum "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
+
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dabbi-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dabbi-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dabbi-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+            dabbi-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz.sha256
+          retention-days: 5
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: false
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          # Move all artifacts to release directory
+          find artifacts -name "*.tar.gz" -exec mv {} release/ \;
+          find artifacts -name "*.sha256" -exec mv {} release/ \;
+
+          # Create combined checksums file
+          cd release
+          cat *.sha256 > checksums.txt
+          rm -f *.sha256
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-homebrew:
+    name: Update Homebrew Tap
+    needs: release
+    runs-on: ubuntu-latest
+    # Only update homebrew for stable releases
+    if: ${{ !contains(github.ref, '-rc') && !contains(github.ref, '-beta') && !contains(github.ref, '-alpha') }}
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: false
+
+      - name: Calculate SHA256 hashes
+        id: sha
+        run: |
+          echo "darwin_amd64=$(sha256sum artifacts/dabbi-darwin-amd64/dabbi-darwin-amd64.tar.gz | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
+          echo "darwin_arm64=$(sha256sum artifacts/dabbi-darwin-arm64/dabbi-darwin-arm64.tar.gz | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
+          echo "linux_amd64=$(sha256sum artifacts/dabbi-linux-amd64/dabbi-linux-amd64.tar.gz | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
+          echo "linux_arm64=$(sha256sum artifacts/dabbi-linux-arm64/dabbi-linux-arm64.tar.gz | cut -d ' ' -f 1)" >> $GITHUB_OUTPUT
+
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: mjshashank/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update formula
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+          SHA_DARWIN_ARM64: ${{ steps.sha.outputs.darwin_arm64 }}
+          SHA_DARWIN_AMD64: ${{ steps.sha.outputs.darwin_amd64 }}
+          SHA_LINUX_ARM64: ${{ steps.sha.outputs.linux_arm64 }}
+          SHA_LINUX_AMD64: ${{ steps.sha.outputs.linux_amd64 }}
+        run: |
+          cd homebrew-tap
+
+          # Base64-encoded formula template (avoids YAML parsing issues)
+          TEMPLATE="IyB0eXBlZDogZmFsc2UKIyBmcm96ZW5fc3RyaW5nX2xpdGVyYWw6IHRydWUKCmNsYXNzIERhYmJpIDwgRm9ybXVsYQogIGRlc2MgIklzb2xhdGVkIExpbnV4IGVudmlyb25tZW50cyBmb3IgQUkgY29kaW5nIGFnZW50cyIKICBob21lcGFnZSAiaHR0cHM6Ly9naXRodWIuY29tL21qc2hhc2hhbmsvZGFiYmkiCiAgdmVyc2lvbiAiVkVSU0lPTl9QTEFDRUhPTERFUiIKICBsaWNlbnNlICJNSVQiCgogIG9uX21hY29zIGRvCiAgICBvbl9hcm0gZG8KICAgICAgdXJsICJodHRwczovL2dpdGh1Yi5jb20vbWpzaGFzaGFuay9kYWJiaS9yZWxlYXNlcy9kb3dubG9hZC92I3t2ZXJzaW9ufS9kYWJiaS1kYXJ3aW4tYXJtNjQudGFyLmd6IgogICAgICBzaGEyNTYgIlNIQV9EQVJXSU5fQVJNNjQiCiAgICBlbmQKICAgIG9uX2ludGVsIGRvCiAgICAgIHVybCAiaHR0cHM6Ly9naXRodWIuY29tL21qc2hhc2hhbmsvZGFiYmkvcmVsZWFzZXMvZG93bmxvYWQvdiN7dmVyc2lvbn0vZGFiYmktZGFyd2luLWFtZDY0LnRhci5neiIKICAgICAgc2hhMjU2ICJTSEFfREFSV0lOX0FNRDY0IgogICAgZW5kCiAgZW5kCgogIG9uX2xpbnV4IGRvCiAgICBvbl9hcm0gZG8KICAgICAgdXJsICJodHRwczovL2dpdGh1Yi5jb20vbWpzaGFzaGFuay9kYWJiaS9yZWxlYXNlcy9kb3dubG9hZC92I3t2ZXJzaW9ufS9kYWJiaS1saW51eC1hcm02NC50YXIuZ3oiCiAgICAgIHNoYTI1NiAiU0hBX0xJTlVYX0FSTTY0IgogICAgZW5kCiAgICBvbl9pbnRlbCBkbwogICAgICB1cmwgImh0dHBzOi8vZ2l0aHViLmNvbS9tanNoYXNoYW5rL2RhYmJpL3JlbGVhc2VzL2Rvd25sb2FkL3Yje3ZlcnNpb259L2RhYmJpLWxpbnV4LWFtZDY0LnRhci5neiIKICAgICAgc2hhMjU2ICJTSEFfTElOVVhfQU1ENjQiCiAgICBlbmQKICBlbmQKCiAgZGVwZW5kc19vbiBjYXNrOiAibXVsdGlwYXNzIgoKICBkZWYgaW5zdGFsbAogICAgYmluLmluc3RhbGwgImRhYmJpIgogIGVuZAoKICBkZWYgY2F2ZWF0cwogICAgPDx+RU9TCiAgICAgIGRhYmJpIHJlcXVpcmVzIG11bHRpcGFzcyB0byBiZSBpbnN0YWxsZWQgYW5kIHJ1bm5pbmcuCgogICAgICBUbyBzdGFydCB0aGUgZGFlbW9uIChwb3J0IDgwIHJlcXVpcmVzIHN1ZG8pOgogICAgICAgIHN1ZG8gZGFiYmkgc2VydmUKCiAgICAgIE9yIG9uIGEgZGlmZmVyZW50IHBvcnQ6CiAgICAgICAgZGFiYmkgc2VydmUgLS1wb3J0IDgwODAKCiAgICAgIFlvdXIgYXV0aCB0b2tlbiBpcyBzdG9yZWQgaW4gfi8uZGFiYmkvY29uZmlnLmpzb24KCiAgICAgIEFjY2VzcyB0aGUgd2ViIFVJIGF0IGh0dHA6Ly9sb2NhbGhvc3QKICAgIEVPUwogIGVuZAoKICB0ZXN0IGRvCiAgICBhc3NlcnRfbWF0Y2ggImRhYmJpIiwgc2hlbGxfb3V0cHV0KCIje2Jpbn0vZGFiYmkgLS1oZWxwIikKICBlbmQKZW5kCg=="
+
+          echo "$TEMPLATE" | base64 -d > Formula/dabbi.rb
+
+          # Replace placeholders
+          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/" Formula/dabbi.rb
+          sed -i "s/SHA_DARWIN_ARM64/${SHA_DARWIN_ARM64}/" Formula/dabbi.rb
+          sed -i "s/SHA_DARWIN_AMD64/${SHA_DARWIN_AMD64}/" Formula/dabbi.rb
+          sed -i "s/SHA_LINUX_ARM64/${SHA_LINUX_ARM64}/" Formula/dabbi.rb
+          sed -i "s/SHA_LINUX_AMD64/${SHA_LINUX_AMD64}/" Formula/dabbi.rb
+
+      - name: Commit and push
+        run: |
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Only commit if there are changes
+          if git diff --quiet Formula/dabbi.rb; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          git add Formula/dabbi.rb
+          git commit -m "Update dabbi to ${GITHUB_REF#refs/tags/}"
+          git push

@@ -1,0 +1,52 @@
+linters:
+  enable:
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+linters-settings:
+  errcheck:
+    # Ignore common functions where errors are intentionally not checked
+    exclude-functions:
+      # HTTP response writing
+      - (net/http.ResponseWriter).Write
+      - (*encoding/json.Encoder).Encode
+      - (*html/template.Template).Execute
+      - (*text/template.Template).Execute
+      # IO operations in cleanup/background contexts
+      - io.Copy
+      - (io.Closer).Close
+      # Process management
+      - (*os/exec.Cmd).Wait
+      - (*os.Process).Kill
+      # Parsing where zero-value is acceptable
+      - fmt.Sscanf
+      # WebSocket operations
+      - (*github.com/gorilla/websocket.Conn).WriteMessage
+      - (*github.com/gorilla/websocket.Conn).SetReadDeadline
+      - (*github.com/gorilla/websocket.Conn).SetWriteDeadline
+      # PTY operations
+      - github.com/creack/pty.Setsize
+      # Network listener operations
+      - (*net.TCPListener).SetDeadline
+      - (*net.TCPConn).CloseWrite
+      # Server shutdown in defer/cleanup
+      - (*net/http.Server).Shutdown
+      - (*net/http.Server).ListenAndServe
+      # Cobra flag setup (panics on error anyway)
+      - (*github.com/spf13/cobra.Command).MarkFlagRequired
+      # Tunnel manager cleanup (error ignored in defer/signal handlers)
+      - (*github.com/mjshashank/dabbi/internal/tunnel.Manager).Delete
+
+  staticcheck:
+    checks: ["all", "-SA9003"]  # Disable empty branch check
+
+issues:
+  # Exclude test files from errcheck
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
