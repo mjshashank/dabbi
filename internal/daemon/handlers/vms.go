@@ -156,18 +156,18 @@ func (h *VMHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Write to temp file
-	// Use 0755 permissions so multipass (in snap sandbox) can access it
-	tmpDir, err := os.MkdirTemp("", "dabbi-cloudinit-*")
+	// Write to temp file in home directory (snap multipass can't access /tmp)
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err)
+		return
+	}
+	tmpDir, err := os.MkdirTemp(homeDir, "dabbi-cloudinit-*")
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err)
 		return
 	}
 	defer os.RemoveAll(tmpDir)
-	if err := os.Chmod(tmpDir, 0755); err != nil {
-		respondError(w, http.StatusInternalServerError, err)
-		return
-	}
 
 	tempCloudInitFile := filepath.Join(tmpDir, "cloud-init.yaml")
 	if err := os.WriteFile(tempCloudInitFile, []byte(modifiedContent), 0644); err != nil {

@@ -121,16 +121,16 @@ Network restrictions can be applied at creation time:
 				// Inject auth token for OpenCode
 				modifiedContent = config.GenerateCloudInitWithAuthToken(modifiedContent, cfg.AuthToken)
 
-				// Write to temp file
-				// Use 0755 permissions so multipass (in snap sandbox) can access it
-				tmpDir, err := os.MkdirTemp("", "dabbi-cloudinit-*")
+				// Write to temp file in home directory (snap multipass can't access /tmp)
+				homeDir, err := os.UserHomeDir()
+				if err != nil {
+					return fmt.Errorf("failed to get home dir: %w", err)
+				}
+				tmpDir, err := os.MkdirTemp(homeDir, "dabbi-cloudinit-*")
 				if err != nil {
 					return fmt.Errorf("failed to create temp dir: %w", err)
 				}
 				defer os.RemoveAll(tmpDir)
-				if err := os.Chmod(tmpDir, 0755); err != nil {
-					return fmt.Errorf("failed to chmod temp dir: %w", err)
-				}
 
 				tempCloudInitFile = filepath.Join(tmpDir, "cloud-init.yaml")
 				if err := os.WriteFile(tempCloudInitFile, []byte(modifiedContent), 0644); err != nil {
@@ -155,16 +155,16 @@ Network restrictions can be applied at creation time:
 				// Inject auth token
 				modifiedContent := config.GenerateCloudInitWithAuthToken(baseContent, cfg.AuthToken)
 
-				// Write to temp file
-				// Use 0755 permissions so multipass (in snap sandbox) can access it
-				tmpDir, err := os.MkdirTemp("", "dabbi-cloudinit-*")
+				// Write to temp file in home directory (snap multipass can't access /tmp)
+				homeDir, err := os.UserHomeDir()
+				if err != nil {
+					return fmt.Errorf("failed to get home dir: %w", err)
+				}
+				tmpDir, err := os.MkdirTemp(homeDir, "dabbi-cloudinit-*")
 				if err != nil {
 					return fmt.Errorf("failed to create temp dir: %w", err)
 				}
 				defer os.RemoveAll(tmpDir)
-				if err := os.Chmod(tmpDir, 0755); err != nil {
-					return fmt.Errorf("failed to chmod temp dir: %w", err)
-				}
 
 				tempCloudInitFile = filepath.Join(tmpDir, "cloud-init.yaml")
 				if err := os.WriteFile(tempCloudInitFile, []byte(modifiedContent), 0644); err != nil {
