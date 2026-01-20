@@ -62,16 +62,54 @@ func (r *Router) parseHost(host string) (vmName string, port int, ok bool) {
 	return vmName, port, true
 }
 
+const agentAuthCookie = "dabbi_agent_token"
+
+// checkAgentAuth validates the auth token for agent requests
+// Token can come from: query param, header, or cookie
+// Sets a cookie on successful auth so subsequent requests (assets) work
+func (r *Router) checkAgentAuth(w http.ResponseWriter, req *http.Request) bool {
+	// Try query parameter first
+	token := req.URL.Query().Get("token")
+
+	// Try header
+	if token == "" {
+		token = req.Header.Get("X-Dabbi-Token")
+	}
+
+	// Try cookie
+	if token == "" {
+		if cookie, err := req.Cookie(agentAuthCookie); err == nil {
+			token = cookie.Value
+		}
+	}
+
+	if token != r.authToken {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return false
+	}
+
+	// Set cookie for subsequent requests (assets, etc.)
+	// Only set if token came from query param or header (not already from cookie)
+	if req.URL.Query().Get("token") != "" || req.Header.Get("X-Dabbi-Token") != "" {
+		http.SetCookie(w, &http.Cookie{
+			Name:     agentAuthCookie,
+			Value:    token,
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteStrictMode,
+			MaxAge:   86400, // 24 hours
+		})
+	}
+
+	return true
+}
+
 // handleVMRequest routes a request to the appropriate VM
 func (r *Router) handleVMRequest(w http.ResponseWriter, req *http.Request, vmName string, port int) {
 	// Auth check for agent port (1234)
 	if port == agentPort && r.authToken != "" {
-		token := req.URL.Query().Get("token")
-		if token == "" {
-			token = req.Header.Get("X-Dabbi-Token")
-		}
-		if token != r.authToken {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		if !r.checkAgentAuth(w, req) {
 			return
 		}
 	}
