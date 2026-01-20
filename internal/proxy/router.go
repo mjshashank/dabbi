@@ -15,10 +15,13 @@ import (
 // Pattern: <vm_name>-<port>.localhost[:port] or <vm_name>-<port>.<domain>[:port]
 var hostPattern = regexp.MustCompile(`^([a-zA-Z0-9][a-zA-Z0-9-]*)-(\d+)\.(localhost|[a-zA-Z0-9.-]+)(:\d+)?$`)
 
+const agentPort = 1234 // OpenCode port inside VM
+
 // Router handles HTTP routing to VMs based on Host header
 type Router struct {
-	mp     multipass.Client
-	waking sync.Map // map[vmName]bool - tracks VMs currently waking
+	mp        multipass.Client
+	authToken string
+	waking    sync.Map // map[vmName]bool - tracks VMs currently waking
 }
 
 // NewRouter creates a new proxy router
@@ -26,6 +29,11 @@ func NewRouter(mp multipass.Client) *Router {
 	return &Router{
 		mp: mp,
 	}
+}
+
+// SetAuthToken configures the auth token for protected ports
+func (r *Router) SetAuthToken(token string) {
+	r.authToken = token
 }
 
 // Middleware returns middleware that routes requests to VMs based on Host header
@@ -56,6 +64,18 @@ func (r *Router) parseHost(host string) (vmName string, port int, ok bool) {
 
 // handleVMRequest routes a request to the appropriate VM
 func (r *Router) handleVMRequest(w http.ResponseWriter, req *http.Request, vmName string, port int) {
+	// Auth check for agent port (1234)
+	if port == agentPort && r.authToken != "" {
+		token := req.URL.Query().Get("token")
+		if token == "" {
+			token = req.Header.Get("X-Dabbi-Token")
+		}
+		if token != r.authToken {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
 	// Get VM info
 	info, err := r.mp.Info(vmName)
 	if err != nil {
@@ -84,7 +104,8 @@ func (r *Router) handleVMRequest(w http.ResponseWriter, req *http.Request, vmNam
 
 // proxyRequest forwards the request to the VM using httputil.ReverseProxy
 func (r *Router) proxyRequest(w http.ResponseWriter, req *http.Request, vmIP string, port int) {
-	target, err := url.Parse(fmt.Sprintf("http://%s:%d", vmIP, port))
+	targetHost := fmt.Sprintf("%s:%d", vmIP, port)
+	target, err := url.Parse(fmt.Sprintf("http://%s", targetHost))
 	if err != nil {
 		http.Error(w, "Invalid target URL", http.StatusInternalServerError)
 		return
@@ -92,12 +113,18 @@ func (r *Router) proxyRequest(w http.ResponseWriter, req *http.Request, vmIP str
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
 
-	// Customize director to preserve Host header for virtual hosting
+	// Customize director to handle WebSocket upgrades and preserve headers
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
-		// Optionally preserve original host for apps that need it
-		// req.Header.Set("X-Forwarded-Host", req.Host)
+		req.Host = targetHost
+		// Preserve WebSocket upgrade headers
+		if req.Header.Get("Upgrade") != "" {
+			req.Header.Set("Connection", "Upgrade")
+		}
+		// Set forwarded headers
+		req.Header.Set("X-Forwarded-Host", req.Host)
+		req.Header.Set("X-Forwarded-Proto", "https")
 	}
 
 	// Custom error handler

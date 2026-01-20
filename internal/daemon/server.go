@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/mjshashank/dabbi/internal/agent"
@@ -44,7 +45,7 @@ func NewServer(cfg ServerConfig) *Server {
 
 	// Use TLS-aware router when domain is configured
 	useTLS := cfg.Domain != ""
-	router := SetupRouterWithTLS(cfg.Config, cfg.MultipassClient, tm, pr, am, useTLS)
+	router := SetupRouterWithTLS(cfg.Config, cfg.MultipassClient, tm, pr, am, useTLS, cfg.Domain)
 
 	return &Server{
 		cfg:      cfg,
@@ -77,10 +78,25 @@ func (s *Server) ListenAndServe() error {
 
 // listenTLS starts an HTTPS server with Let's Encrypt
 func (s *Server) listenTLS() error {
+	domain := s.cfg.Domain
 	certManager := autocert.Manager{
-		Prompt:     autocert.AcceptTOS,
-		HostPolicy: autocert.HostWhitelist(s.cfg.Domain),
-		Cache:      autocert.DirCache(".dabbi-certs"),
+		Prompt: autocert.AcceptTOS,
+		HostPolicy: func(ctx context.Context, host string) error {
+			// Allow the main domain
+			if host == domain {
+				return nil
+			}
+			// Allow subdomains: <vm>-<port>.<domain>
+			if strings.HasSuffix(host, "."+domain) {
+				prefix := strings.TrimSuffix(host, "."+domain)
+				// Validate subdomain format: must contain a hyphen (vm-port pattern)
+				if idx := strings.LastIndex(prefix, "-"); idx > 0 {
+					return nil
+				}
+			}
+			return fmt.Errorf("host %q not allowed", host)
+		},
+		Cache: autocert.DirCache(".dabbi-certs"),
 	}
 
 	srv := &http.Server{

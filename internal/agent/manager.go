@@ -163,3 +163,21 @@ func (m *Manager) IsRunning(vmName string) bool {
 	_, exists := m.listeners.Load(vmName)
 	return exists
 }
+
+// VerifyVM checks if a VM exists and is running (without starting a listener)
+func (m *Manager) VerifyVM(vmName string) error {
+	info, err := m.mp.Info(vmName)
+	if err != nil {
+		return fmt.Errorf("VM '%s' not found: %w", vmName, err)
+	}
+
+	if info.State != multipass.StateRunning {
+		return fmt.Errorf("VM '%s' is not running (state: %s)", vmName, info.State)
+	}
+
+	if len(info.IPv4) == 0 {
+		return fmt.Errorf("VM '%s' has no IP address", vmName)
+	}
+
+	return nil
+}

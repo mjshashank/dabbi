@@ -23,7 +23,7 @@ func SetupRouter(
 	pr *proxy.Router,
 	am *agent.Manager,
 ) http.Handler {
-	return SetupRouterWithTLS(cfg, mp, tm, pr, am, false)
+	return SetupRouterWithTLS(cfg, mp, tm, pr, am, false, "")
 }
 
 // SetupRouterWithTLS configures and returns the HTTP router with TLS awareness
@@ -34,8 +34,12 @@ func SetupRouterWithTLS(
 	pr *proxy.Router,
 	am *agent.Manager,
 	useTLS bool,
+	domain string,
 ) http.Handler {
 	r := chi.NewRouter()
+
+	// Configure proxy router with auth token for protected ports
+	pr.SetAuthToken(cfg.AuthToken)
 
 	// Global middleware
 	r.Use(middleware.Logger)
@@ -102,8 +106,8 @@ func SetupRouterWithTLS(
 		shellHandler := handlers.NewShellHandler(mp)
 		r.Get("/vms/{name}/shell", shellHandler.Handle)
 
-		// Agent (opencode) - returns URL to access agent on dedicated port
-		agentHandler := handlers.NewAgentHandler(am)
+		// Agent (opencode) - returns URL to access agent via subdomain proxy
+		agentHandler := handlers.NewAgentHandler(am, domain, cfg.AuthToken, useTLS)
 		r.Get("/vms/{name}/agent-url", agentHandler.GetURL)
 	})
 
